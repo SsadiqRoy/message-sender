@@ -16,11 +16,13 @@ The package retains the requested `"next": "^16.0.10"`; package-lock pins the te
 
 All application tables have RLS enabled and direct anon/authenticated grants revoked. The server validates the bearer token against Supabase Auth and checks active ms_members membership before using service-role access. No authorization is taken from editable user metadata. Existing prospects and workspace_members are untouched. The informational advisor notices for RLS without policies are intentional: clients cannot directly access these server-only tables.
 
-Admin creation is chief-only. SMTP profiles are shared. SMS code changes are chief-only. SMTP passwords are request-only. Each send reauthenticates the acting admin and makes one external call per recipient. A request key prevents replay within one operation. Interrupted or ambiguous deliveries must be reviewed before resending; provider acceptance is not proof of inbox delivery. Previous message bodies remain in immutable versions.
+Admin creation is chief-only. SMTP profiles are shared. SMS uses the server-side sendSms function. SMTP passwords are request-only. Each send reauthenticates the acting admin and makes one external call per recipient. A request key prevents replay within one operation. Interrupted or ambiguous deliveries must be reviewed before resending; provider acceptance is not proof of inbox delivery. Previous message bodies remain in immutable versions.
 
-## SMS runner contract
+## SMS provider
 
-Custom functions are stored, but are **not evaluated by the Next.js server**. Configure SMS_RUNNER_URL and SMS_RUNNER_TOKEN for a separately deployed execution service. It must authenticate the token, execute each request in a disposable sandbox with CPU/time/memory limits, deny internal-network access, restrict outbound provider destinations, and inject provider credentials out of band. POST payload: `{ connectionId, code, functionName, phone, message }`; return HTTP 2xx only after provider acceptance. The runner is not bundled in this initial implementation. Without it SMS returns a configuration error.
+SMS calls the existing `sendSms(phone, message)` function directly. `SMS_RUNNER_URL` and `SMS_RUNNER_TOKEN` retain their existing provider URL/API-key meaning. No SMS connection record is selected, queried or required. New SMS versions store `connection_id: null`; old SMS versions also send without looking up their historical connection. Email continues to use saved SMTP profiles.
+
+Password confirmation creates a separate, nonpersistent session and cleans it up with `scope: 'local'`. It never globally signs out the user. Expired/revoked browser sessions return to login, and explicit logout uses local scope with visible error handling. After updating from the previous global-signout version, log in again once to replace any already-revoked session. No database migration is required.
 
 ## Current implementation limits
 
@@ -28,7 +30,7 @@ Custom functions are stored, but are **not evaluated by the Next.js server**. Co
 - Drafts are saved explicitly; autosave is not implemented.
 - Excel imports use the first worksheet. Column mapping is supported; the applied summary follows import, rather than a full dry-run diff.
 - Attachments are limited to 5 MB total and saved with message versions in Postgres. Use object storage for larger production workloads.
-- Recipient creation/import is available in Recipients. In-composer add/import, test-send shortcut, segment/encoding calculation and an isolated SMS runner remain follow-up work.
+- Recipient creation/import is available in Recipients. In-composer add/import, test-send shortcut, segment/encoding calculation remain follow-up work.
 - Profile changes support email and password. Name editing and forgot-password UI remain follow-up work.
 - Authenticated visual QA and live provider sends require configured server secrets, a chief account and SMTP/provider credentials. No live messages were sent during development.
 

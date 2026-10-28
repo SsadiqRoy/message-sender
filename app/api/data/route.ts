@@ -1,17 +1,17 @@
-import { authorize } from "@/lib/db";
+import { authorize, AuthError } from "@/lib/db";
 import { mergeRecipient, normalize } from "@/lib/recipients";
 export async function GET(req: Request) {
   try {
     const { db, member } = await authorize(req);
     const result: Record<string, unknown> = { member };
     for (const t of ["recipients", "connections", "messages", "versions", "attempts", ...(member.role === "chief" ? ["members"] : [])]) {
-      const { data, error } = await db.from("ms_" + t).select("*");
+      const { data, error } = await (t === "connections" ? db.from("ms_connections").select("*").eq("channel", "email") : db.from("ms_" + t).select("*"));
       if (error) throw error;
       result[t] = data;
     }
     return Response.json(result);
   } catch (e) {
-    return Response.json({ error: (e as Error).message }, { status: 403 });
+    return Response.json({ error: (e as Error).message }, { status: e instanceof AuthError ? e.status : 500 });
   }
 }
 export async function POST(req: Request) {
@@ -56,11 +56,10 @@ export async function POST(req: Request) {
       }
       result = summary;
     } else if (b.action === "connection") {
-      if (!["email", "sms"].includes(b.value.channel)) throw Error("Invalid channel");
-      if (b.value.channel === "sms" && member.role !== "chief") throw Error("Chief admin required");
+      if (b.value.channel !== "email") throw Error("Only email sender profiles are supported");
       if (b.id) {
         const { data: old } = await db.from("ms_connections").select("channel").eq("id", b.id).single();
-        if (old?.channel === "sms" && member.role !== "chief") throw Error("Chief admin required");
+        if (old?.channel !== "email") throw Error("Only email sender profiles can be edited");
       }
       const config = { ...b.value.config };
       delete config.password;
@@ -93,7 +92,7 @@ export async function POST(req: Request) {
           message_id: id,
           subject: v.subject || "",
           body: v.body,
-          connection_id: v.connection_id || null,
+          connection_id: v.channel === "sms" ? null : v.connection_id || null,
           recipient_ids: v.recipient_ids || [],
           attachments: v.attachments || [],
         })
@@ -110,6 +109,6 @@ export async function POST(req: Request) {
     } else throw Error("Unknown action");
     return Response.json({ result });
   } catch (e) {
-    return Response.json({ error: (e as Error).message }, { status: 400 });
+    return Response.json({ error: (e as Error).message }, { status: e instanceof AuthError ? e.status : 400 });
   }
 }

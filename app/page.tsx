@@ -28,6 +28,11 @@ export default function App() {
     [rich, Rich] = useState(true),
     [mapping, Map] = useState({ name: "name", email: "email", phone: "phone", description: "description" });
 
+  async function logout() {
+    const { error } = await supabase.auth.signOut({ scope: 'local' });
+    if (error) { N('Logout failed: ' + error.message + '. Please retry.'); return; }
+    S(null); D({ messages: [], versions: [], recipients: [], connections: [], attempts: [] }); M(''); P(''); SP('');
+  }
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
       S(data.session);
@@ -41,12 +46,18 @@ export default function App() {
     const {
       data: { session: s },
     } = await supabase.auth.getSession();
+    if (!s) { S(null); throw Error('Your session has expired. Please log in again.'); }
     const res = await fetch("/api/" + path, {
       method: body ? "POST" : "GET",
       headers: { "Content-Type": "application/json", Authorization: "Bearer " + s?.access_token },
       ...(body ? { body: JSON.stringify(body) } : {}),
     });
     const d = await res.json();
+    if (res.status === 401) {
+      await logout();
+      S(null); D({ messages: [], versions: [], recipients: [], connections: [], attempts: [] }); M('');
+      throw Error('Your session is no longer valid. Please log in again.');
+    }
     if (!res.ok) throw Error(d.error || "Request failed");
     return d;
   }
@@ -194,9 +205,9 @@ export default function App() {
           ))}
         </nav>
         <span>
-          {data.member?.name} · {data.member?.role === "chief" ? "Chief admin" : "Admin"}
+          {data.member ? `${data.member.name} · ${data.member.role === "chief" ? "Chief admin" : "Admin"}` : "Account data unavailable"}
         </span>
-        <button className="quiet" onClick={() => supabase.auth.signOut()}>
+        <button className="quiet" onClick={() => run(logout)}>
           Log out
         </button>
       </header>
@@ -330,8 +341,8 @@ export default function App() {
         {tab === "Settings" && (
           <>
             <section className="card">
-              <h2>Senders & connections</h2>
-              {data.connections.map((c: Row) => (
+              <h2>Email senders</h2>
+              {data.connections.filter((c: Row) => c.channel === "email").map((c: Row) => (
                 <article className="connection" key={c.id}>
                   <h3>
                     {c.label} <span className="badge">{c.channel}</span>
@@ -360,7 +371,7 @@ export default function App() {
                   )}
                 </article>
               ))}
-              <button onClick={() => open("Connection", { channel: "email", port: "587", functionName: "sendSms" })}>Add connection</button>
+              <button onClick={() => open("Connection", { channel: "email", port: "587" })}>Add email sender</button>
             </section>
             <section className="card">
               <h2>My profile</h2>
@@ -465,11 +476,8 @@ export default function App() {
                       "connection",
                       {
                         label: edit.label,
-                        channel: edit.channel,
-                        config:
-                          edit.channel === "email"
-                            ? { server: edit.server, port: edit.port, user: edit.user, fromName: edit.fromName, fromEmail: edit.fromEmail }
-                            : { functionName: edit.functionName, code: edit.code },
+                        channel: "email",
+                        config: { server: edit.server, port: edit.port, user: edit.user, fromName: edit.fromName, fromEmail: edit.fromEmail },
                       },
                       edit.id,
                     );
@@ -478,38 +486,12 @@ export default function App() {
                 }}
               >
                 {field("Label", "label")}
-                <label>
-                  Channel
-                  <select value={edit.channel} onChange={(e) => E({ ...edit, channel: e.target.value })}>
-                    <option value="email">Email</option>
-                    {data.member?.role === "chief" && <option value="sms">SMS</option>}
-                  </select>
-                </label>
-                {edit.channel === "email" ? (
-                  <>
-                    {field("SMTP server", "server")}
-                    {field("Port", "port", "number")}
-                    {field("Username", "user")}
-                    {field("From name", "fromName")}
-                    {field("From email", "fromEmail", "email")}
-                    <small>SMTP password is requested at send time and is never saved.</small>
-                  </>
-                ) : (
-                  <>
-                    {field("Function name", "functionName")}
-                    <label>
-                      Async function
-                      <textarea
-                        className="code"
-                        rows={12}
-                        value={edit.code || ""}
-                        onChange={(e) => E({ ...edit, code: e.target.value })}
-                        placeholder="async function sendSms(phone, message) { ... }"
-                      />
-                    </label>
-                    <p>Executed by the isolated SMS runner. Provider secrets belong in the runner, not this code.</p>
-                  </>
-                )}
+                {field("SMTP server", "server")}
+                {field("Port", "port", "number")}
+                {field("Username", "user")}
+                {field("From name", "fromName")}
+                {field("From email", "fromEmail", "email")}
+                <small>SMTP password is requested at send time and is never saved.</small>
                 <button disabled={busy}>Save connection</button>
               </form>
             )}
@@ -527,7 +509,7 @@ export default function App() {
                       </label>
                     )}
                     {field("Internal title", "title")}
-                    <label>
+                    {edit.channel === "email" && <label>
                       Sender
                       <select value={edit.connection_id || ""} onChange={(e) => E({ ...edit, connection_id: e.target.value })}>
                         <option value="">Choose sender</option>
@@ -539,7 +521,7 @@ export default function App() {
                             </option>
                           ))}
                       </select>
-                    </label>
+                    </label>}
                     {edit.channel === "email" && field("Subject", "subject")}
                     {edit.channel === "email" && (
                       <div className="actions">
@@ -754,10 +736,10 @@ export default function App() {
                   Your login password
                   <input type="password" autoComplete="current-password" value={password} onChange={(e) => P(e.target.value)} />
                 </label>
-                <label>
-                  SMTP password (email only)
+                {data.messages.find((m: Row) => m.id === detail?.message_id)?.channel === "email" && <label>
+                  SMTP password
                   <input type="password" autoComplete="off" value={smtp} onChange={(e) => SP(e.target.value)} />
-                </label>
+                </label>}
                 <button disabled={busy || !password || !selected.length} onClick={() => run(send)}>
                   {busy ? "Sending…" : "Confirm & send"}
                 </button>

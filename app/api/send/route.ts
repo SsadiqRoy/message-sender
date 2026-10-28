@@ -1,4 +1,4 @@
-import { authorize, reauthenticate } from "@/lib/db";
+import { authorize, reauthenticate, AuthError } from "@/lib/db";
 import axios from "axios";
 import nodemailer from "nodemailer";
 import sanitize from "sanitize-html";
@@ -13,12 +13,17 @@ export async function POST(req: Request) {
     if (!/^[a-f0-9-]{36}$/i.test(b.requestId || "")) throw Error("Invalid request ID");
     const { data: v } = await db.from("ms_versions").select("*,ms_messages(channel)").eq("id", b.versionId).single();
     if (!v) throw Error("Version not found");
-    const { data: c } = await db.from("ms_connections").select("*").eq("id", v.connection_id).single();
-    if (!c || c.channel !== v.ms_messages.channel) throw Error("Choose a compatible sender");
+    const channel = v.ms_messages.channel;
+    let c = null;
+    if (channel === "email") {
+      const { data } = await db.from("ms_connections").select("*").eq("id", v.connection_id).eq("channel", "email").single();
+      if (!data) throw Error("Choose an email sender");
+      c = data;
+    }
     const { data: r } = await db.from("ms_recipients").select("*").eq("id", b.recipientId).single();
     if (!r) throw Error("Recipient not found");
 
-    const dest = c.channel === "email" ? r.email : r.phone;
+    const dest = channel === "email" ? r.email : r.phone;
     if (!dest) throw Error("Recipient has no destination for this channel");
 
     const key = b.requestId + ":" + r.id;
@@ -34,7 +39,7 @@ export async function POST(req: Request) {
 
     try {
       const body = v.body.replaceAll("{{name}}", r.name || "there");
-      if (c.channel === "email") {
+      if (channel === "email" && c) {
         if (!b.smtpPassword) throw Error("SMTP password required");
         const transport = nodemailer.createTransport({
           host: c.config.server,
@@ -64,20 +69,6 @@ export async function POST(req: Request) {
           transport.close();
         }
       } else {
-        // if (!process.env.SMS_RUNNER_URL || !process.env.SMS_RUNNER_TOKEN) throw Error("SMS runner is not configured");
-        // const response = await fetch(process.env.SMS_RUNNER_URL, {
-        //   method: "POST",
-        //   headers: { "content-type": "application/json", authorization: "Bearer " + process.env.SMS_RUNNER_TOKEN },
-        //   body: JSON.stringify({
-        //     connectionId: c.id,
-        //     code: c.config.code,
-        //     functionName: c.config.functionName || "sendSms",
-        //     phone: dest,
-        //     message: body,
-        //   }),
-        //   signal: AbortSignal.timeout(20000),
-        // });
-        // if (!response.ok) throw Error("SMS provider rejected the request");
         await sendSms(dest, body);
       }
       const { error: updateError } = await db.from("ms_attempts").update({ status: "success" }).eq("id", attempt.id);
@@ -89,7 +80,7 @@ export async function POST(req: Request) {
       return Response.json({ status: "unknown", error: message });
     }
   } catch (e) {
-    return Response.json({ error: (e as Error).message }, { status: 400 });
+    return Response.json({ error: (e as Error).message }, { status: e instanceof AuthError ? e.status : 400 });
   }
 }
 
