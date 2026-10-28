@@ -1,7 +1,119 @@
-import {authorize,reauthenticate} from '@/lib/db';
-import nodemailer from 'nodemailer';
-import sanitize from 'sanitize-html';
-export const runtime='nodejs';
-export const maxDuration=60;
-export async function POST(req:Request){try{const {db,user}=await authorize(req);const b=await req.json();await reauthenticate(user.email!,b.password);if(!/^[a-f0-9-]{36}$/i.test(b.requestId||''))throw Error('Invalid request ID');const {data:v}=await db.from('ms_versions').select('*,ms_messages(channel)').eq('id',b.versionId).single();if(!v)throw Error('Version not found');const {data:c}=await db.from('ms_connections').select('*').eq('id',v.connection_id).single();if(!c||c.channel!==v.ms_messages.channel)throw Error('Choose a compatible sender');const {data:r}=await db.from('ms_recipients').select('*').eq('id',b.recipientId).single();if(!r)throw Error('Recipient not found');const dest=c.channel==='email'?r.email:r.phone;if(!dest)throw Error('Recipient has no destination for this channel');const key=b.requestId+':'+r.id;const {data:attempt,error}=await db.from('ms_attempts').insert({version_id:v.id,recipient_id:r.id,destination:dest,status:'sending',request_key:key}).select().single();if(error){if(error.code==='23505')return Response.json({status:'already_requested'});throw error;}
-try{const body=v.body.replaceAll('{{name}}',r.name||'there');if(c.channel==='email'){if(!b.smtpPassword)throw Error('SMTP password required');const transport=nodemailer.createTransport({host:c.config.server,port:Number(c.config.port),secure:Number(c.config.port)===465,requireTLS:Number(c.config.port)!==465,auth:{user:c.config.user,pass:b.smtpPassword},connectionTimeout:15000,socketTimeout:20000});try{await transport.sendMail({from:{name:c.config.fromName||c.label,address:c.config.fromEmail||c.config.user},to:dest,subject:v.subject.replaceAll('{{name}}',r.name||'there'),html:sanitize(body,{allowedTags:sanitize.defaults.allowedTags.concat(['img']),allowedAttributes:{...sanitize.defaults.allowedAttributes,img:['src','alt','width','height']}}),attachments:(v.attachments||[]).map((a:{name:string;content:string})=>({filename:a.name,content:Buffer.from(a.content,'base64')}))});}finally{transport.close();}}else{if(!process.env.SMS_RUNNER_URL||!process.env.SMS_RUNNER_TOKEN)throw Error('SMS runner is not configured');const response=await fetch(process.env.SMS_RUNNER_URL,{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+process.env.SMS_RUNNER_TOKEN},body:JSON.stringify({connectionId:c.id,code:c.config.code,functionName:c.config.functionName||'sendSms',phone:dest,message:body}),signal:AbortSignal.timeout(20000)});if(!response.ok)throw Error('SMS provider rejected the request');}const {error:updateError}=await db.from('ms_attempts').update({status:'success'}).eq('id',attempt.id);if(updateError)throw Error('Provider accepted, but delivery record update failed');return Response.json({status:'success'});}catch(e){const message=(e as Error).message;await db.from('ms_attempts').update({status:'unknown',error:message}).eq('id',attempt.id);return Response.json({status:'unknown',error:message});}}catch(e){return Response.json({error:(e as Error).message},{status:400});}}
+import { authorize, reauthenticate } from "@/lib/db";
+import axios from "axios";
+import nodemailer from "nodemailer";
+import sanitize from "sanitize-html";
+export const runtime = "nodejs";
+export const maxDuration = 60;
+export async function POST(req: Request) {
+  try {
+    const { db, user } = await authorize(req);
+    const b = await req.json();
+    await reauthenticate(user.email!, b.password);
+
+    if (!/^[a-f0-9-]{36}$/i.test(b.requestId || "")) throw Error("Invalid request ID");
+    const { data: v } = await db.from("ms_versions").select("*,ms_messages(channel)").eq("id", b.versionId).single();
+    if (!v) throw Error("Version not found");
+    const { data: c } = await db.from("ms_connections").select("*").eq("id", v.connection_id).single();
+    if (!c || c.channel !== v.ms_messages.channel) throw Error("Choose a compatible sender");
+    const { data: r } = await db.from("ms_recipients").select("*").eq("id", b.recipientId).single();
+    if (!r) throw Error("Recipient not found");
+
+    const dest = c.channel === "email" ? r.email : r.phone;
+    if (!dest) throw Error("Recipient has no destination for this channel");
+
+    const key = b.requestId + ":" + r.id;
+    const { data: attempt, error } = await db
+      .from("ms_attempts")
+      .insert({ version_id: v.id, recipient_id: r.id, destination: dest, status: "sending", request_key: key })
+      .select()
+      .single();
+    if (error) {
+      if (error.code === "23505") return Response.json({ status: "already_requested" });
+      throw error;
+    }
+
+    try {
+      const body = v.body.replaceAll("{{name}}", r.name || "there");
+      if (c.channel === "email") {
+        if (!b.smtpPassword) throw Error("SMTP password required");
+        const transport = nodemailer.createTransport({
+          host: c.config.server,
+          port: Number(c.config.port),
+          secure: Number(c.config.port) === 465,
+          requireTLS: Number(c.config.port) !== 465,
+          auth: { user: c.config.user, pass: b.smtpPassword },
+          connectionTimeout: 15000,
+          socketTimeout: 20000,
+          tls: { rejectUnauthorized: false },
+        });
+        try {
+          await transport.sendMail({
+            from: { name: c.config.fromName || c.label, address: c.config.fromEmail || c.config.user },
+            to: dest,
+            subject: v.subject.replaceAll("{{name}}", r.name || "there"),
+            html: sanitize(body, {
+              allowedTags: sanitize.defaults.allowedTags.concat(["img"]),
+              allowedAttributes: { ...sanitize.defaults.allowedAttributes, img: ["src", "alt", "width", "height"] },
+            }),
+            attachments: (v.attachments || []).map((a: { name: string; content: string }) => ({
+              filename: a.name,
+              content: Buffer.from(a.content, "base64"),
+            })),
+          });
+        } finally {
+          transport.close();
+        }
+      } else {
+        // if (!process.env.SMS_RUNNER_URL || !process.env.SMS_RUNNER_TOKEN) throw Error("SMS runner is not configured");
+        // const response = await fetch(process.env.SMS_RUNNER_URL, {
+        //   method: "POST",
+        //   headers: { "content-type": "application/json", authorization: "Bearer " + process.env.SMS_RUNNER_TOKEN },
+        //   body: JSON.stringify({
+        //     connectionId: c.id,
+        //     code: c.config.code,
+        //     functionName: c.config.functionName || "sendSms",
+        //     phone: dest,
+        //     message: body,
+        //   }),
+        //   signal: AbortSignal.timeout(20000),
+        // });
+        // if (!response.ok) throw Error("SMS provider rejected the request");
+        await sendSms(dest, body);
+      }
+      const { error: updateError } = await db.from("ms_attempts").update({ status: "success" }).eq("id", attempt.id);
+      if (updateError) throw Error("Provider accepted, but delivery record update failed");
+      return Response.json({ status: "success" });
+    } catch (e) {
+      const message = (e as Error).message;
+      await db.from("ms_attempts").update({ status: "unknown", error: message }).eq("id", attempt.id);
+      return Response.json({ status: "unknown", error: message });
+    }
+  } catch (e) {
+    return Response.json({ error: (e as Error).message }, { status: 400 });
+  }
+}
+
+async function sendSms(phone: string, message: string) {
+  const receiver = phone;
+
+  const messageBody = {
+    sender: "SupaSpace",
+    recipients: [receiver],
+    message: message,
+  };
+
+  try {
+    const response = await axios({
+      url: process.env.SMS_RUNNER_URL,
+      data: messageBody,
+      method: "POST",
+      headers: {
+        "api-key": process.env.SMS_RUNNER_TOKEN,
+      },
+    });
+    return response.data;
+  } catch (error: any) {
+    console.log(error?.response?.data! || error);
+    throw new Error("Sorry! We couldn`t send the sms to your phone");
+  }
+}
